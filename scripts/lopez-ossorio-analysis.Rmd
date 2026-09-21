@@ -1,0 +1,211 @@
+---
+title: "lopez-ossorio-replication"
+author: "Gregy Gustavo Tuerah"
+date: "Today"
+output:
+  pdf_document:
+    toc: true
+    number_sections: true
+    keep_tex: true
+---
+
+```{r setup, include=FALSE}
+# Setup
+knitr::opts_chunk$set(echo = TRUE)
+library(readxl)     # read_excel()
+library(dplyr)      # mutate, filter, relocate, arrange, etc.
+library(ggplot2)    # plots
+library(knitr)      # kable()
+library(kableExtra) # LaTeX formatting for tables
+
+```
+
+```{r}
+# Opening and creating the table and dataframe
+df <- read_excel("../data/lopez_osrio.xls") # kindly change this to the path where you save the file
+df <- df %>%
+  mutate(across(c(chi_sqr, coefficient, low_cl, high_cl, 
+                  present, absent, missing, percentage_valid),
+                ~ as.numeric(as.character(.))))
+
+kable(df, format = "latex", 
+      booktabs = TRUE,
+      caption = "Dataframe from López-Osorio Study") %>%
+  kable_styling(latex_options = c("hold_position", "scale_down"),
+                font_size = 8.5) %>%
+  landscape()
+```
+
+```{r}
+df %>%
+  filter(!is.na(significance_lvl)) %>% count() # early checking for the number of significant variables
+```
+
+```{r}
+# Plotting to the uniform distribution
+df <- df %>%
+  mutate(p_value = round((
+    pchisq(q = chi_sqr, df = 1, lower.tail = FALSE)), 5)) %>%
+  relocate(p_value, .after = chi_sqr)
+
+df %>% filter(p_value < 0.05) %>%   
+  count() # count how many are significant at 5%
+
+# Plot p_value distribution vs uniform distribution
+ggplot(df, aes(x = p_value)) +
+  geom_histogram(aes(y = ..density..),
+                 bins = 30,
+                 fill = "steelblue",
+                 alpha = 0.6,
+                 color = "red") +
+  stat_function(fun = dunif,
+                args = list(min = 0, max = 1),
+                color = "grey40",
+                size = 1.2,
+                inherit.aes = FALSE) +
+  coord_cartesian(ylim = c(0, 5)) +
+  labs(x = "p_value",
+       y = "Density",
+       title = "P Value Distribution Compared to the Uniform Distribution") +
+  theme_minimal(base_size = 13)
+```
+
+```{r}
+# Define threshold
+n_tests <- 65
+bonf_threshold <- 0.05 / n_tests
+
+# Apply Bonferroni correction
+df <- df %>%
+  mutate(
+    bonferroni_p_values = bonf_threshold,
+    bonf_sign_lvl = as.integer(p_value < bonferroni_p_values)
+  ) %>%
+  relocate(bonferroni_p_values, bonf_sign_lvl, .after = p_value)
+
+# Optional: check threshold
+print(bonf_threshold)
+
+# List non-significant under Bonferroni
+df %>%
+  filter(bonf_sign_lvl == 0) %>%
+  select(variable, p_value, bonferroni_p_values) %>%
+  kable()
+
+# Count how many are Bonferroni-significant
+df %>%
+  filter(bonf_sign_lvl == 1) %>%
+  count()
+```
+
+```{r}
+# Set FDR level
+alpha <- 0.05
+
+# Add BH-adjusted p-values
+df <- df %>%
+  mutate(bh_p_values = p.adjust(p_value, method = "BH")) %>%
+  relocate(bh_p_values, .after = bonferroni_p_values)
+
+# Create ranked plot data
+df_bh <- df %>%
+  arrange(p_value) %>%
+  mutate(
+    i            = row_number(),
+    m            = n(),
+    bh_threshold = i / m * alpha
+  )
+
+# Plot BH threshold vs raw p-values
+ggplot(df_bh, aes(x = i)) +
+  geom_point(aes(y = p_value), color = "midnightblue", size = 1.75) +
+  geom_line(aes(y = bh_threshold), color = "firebrick2", size = 1.25) +
+  labs(
+    x = "Ranked test index i",
+    y = "P-value vs BH threshold",
+    title = "Benjamini–Hochberg FDR Correction"
+  ) +
+  theme_classic(base_size = 13)
+
+# Count how many are BH-significant
+n_significant_bh <- df %>%
+  filter(bh_p_values <= alpha) %>%
+  count() %>%
+  pull(n)
+
+# Estimate expected false discoveries
+expected_false_rejections <- alpha * n_significant_bh
+
+# Print results
+cat("Number of BH-significant predictors:", n_significant_bh, "\n")
+cat("Expected false discoveries (at 5% FDR):", expected_false_rejections, "\n")
+```
+
+```{r}
+# FDR and p_value
+alpha <- 0.05
+m <- nrow(df)
+
+# Compute empirical FDR_i and BH threshold qi
+df_fdr <- df %>%
+  arrange(p_value) %>%
+  mutate(
+    i           = row_number(),
+    qi          = i / m * alpha,
+    p_i         = i / m,
+    fdr_i       = pmin(m * p_value / i, 1)
+  ) %>%
+  select(variable, p_value, qi, fdr_i)
+
+kable(df_fdr, format = "latex", caption = "Empirical FDR Estimates and BH Thresholds") %>%
+  kable_styling(
+    latex_options = c("hold_position", "scale_down", "landscape"),
+    font_size = 10
+  )
+```
+
+```{r}
+# List of tables
+df_table <- df %>%
+  mutate(
+    `Single Test`     = if_else(p_value < 0.05, "Yes", "No"),
+    `Bonferroni Test` = if_else(bonf_sign_lvl == 1, "Yes", "No"),
+    `BH Test`         = if_else(bh_p_values < 0.05, "Yes", "No")
+  ) %>%
+  select(No = id, Predictors = variable, `Single Test`, `Bonferroni Test`, `BH Test`)
+
+kable(df_table, format = "latex", booktabs = TRUE,
+      caption = "Multiple Hypothesis Testing Decisions for Each Predictor") %>%
+  kable_styling(latex_options = c("hold_position", "scale_down", "landscape")) %>%
+  footnote(
+    general_title = "Notes:",
+    general = c(
+      "“Yes” = reject null hypothesis at 5% level.",
+      "`Single Test` uses raw p-values.",
+      "`Bonferroni Test` applies family-wise error rate correction.",
+      "`BH Test` uses the Benjamini–Hochberg false discovery rate method."
+    )
+  )
+
+# Most Significant
+df_table %>%
+  filter(`Single Test` == "Yes",
+         `Bonferroni Test` == "Yes",
+         `BH Test` == "Yes") %>%
+  arrange(Predictors) %>%
+  select(Predictors) %>%
+  kable(format = "latex", booktabs = TRUE,
+        caption = "Predictors Significant Under All Three Testing Procedures") %>%
+  kable_styling(latex_options = c("hold_position", "scale_down"))
+
+# Least Significant
+df_table %>%
+  filter(`Single Test` == "No",
+         `Bonferroni Test` == "No",
+         `BH Test` == "No") %>%
+  arrange(Predictors) %>%
+  select(Predictors) %>%
+  kable(format = "latex", booktabs = TRUE,
+        caption = "Predictors Not Significant Under Any Test") %>%
+  kable_styling(latex_options = c("hold_position", "scale_down"))
+```
